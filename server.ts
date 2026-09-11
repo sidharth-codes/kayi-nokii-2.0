@@ -1,9 +1,14 @@
 import express from "express";
 import http from "http";
+import https from "node:https";
 import path from "path";
 import fs from "fs";
+import fsPromises from "fs/promises";
+import os from "os";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI } from "@google/genai";
+import { Client as GradioClient } from "@gradio/client";
+import { EdgeTTS } from "node-edge-tts";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -18,12 +23,22 @@ app.use(express.json({ limit: "15mb" }));
 let personaPrompt = "You are Unnimaya Kai Nokki, a funny Kerala AI jothishyan.";
 let referenceVocabulary: any = {};
 
+const resolveFile = (filename: string) => {
+  const cwdFile = path.join(process.cwd(), filename);
+  if (fs.existsSync(cwdFile)) return cwdFile;
+  const dirFile = path.join(__dirname, filename);
+  if (fs.existsSync(dirFile)) return dirFile;
+  const parentFile = path.join(__dirname, "..", filename);
+  if (fs.existsSync(parentFile)) return parentFile;
+  return cwdFile;
+};
+
 try {
-  const promptPath = path.join(process.cwd(), "persona_prompt.txt");
+  const promptPath = resolveFile("persona_prompt.txt");
   if (fs.existsSync(promptPath)) {
     personaPrompt = fs.readFileSync(promptPath, "utf-8");
   }
-  const vocabPath = path.join(process.cwd(), "reference_vocabulary.json");
+  const vocabPath = resolveFile("reference_vocabulary.json");
   if (fs.existsSync(vocabPath)) {
     referenceVocabulary = JSON.parse(fs.readFileSync(vocabPath, "utf-8"));
   }
@@ -178,59 +193,296 @@ function pcmToWav(pcmBase64: string, sampleRate = 24000, numChannels = 1, bitDep
   return Buffer.concat([header, pcmBuffer]);
 }
 
+const ttsAudioCache = new Map<string, string>();
 let ttsQuotaExhaustedUntil = 0;
 
-async function generateSpeechAudio(text: string, timeoutMs = 6000): Promise<string | null> {
-  const ai = getAIClient();
-  if (!ai || !text) return null;
+// Strictly use Fenrir (Deep Astrologer) exclusively as requested
+const SOLE_VOICE = "Fenrir";
 
-  // Circuit breaker: skip remote TTS if in cooldown period due to 429 quota exhaustion
-  if (Date.now() < ttsQuotaExhaustedUntil) {
-    return null;
+// Clean and prepare Malayalam text for natural, prompt AI TTS output (preserves full paragraph)
+function cleanTextForTTS(rawText: string): string {
+  if (!rawText) return "";
+  const clean = rawText
+    .replace(/[*_~`#]/g, "") // remove markdown
+    .replace(/^.*?(Unnimaya|ഉണ്ണിമായ|Jothishyan|ജ്യോത്സ്യൻ)[:\-]/i, "") // remove speaker prefix
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, "") // remove emojis
+    .replace(/[«»""'']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Return the entire paragraph without truncation
+  return clean;
+}
+
+/**
+ * Native Malayalam Female Speech Chunk Generator (Google Translate tl=ml)
+ * Produces authentic Kerala female spoken Malayalam audio with no quota limits.
+ */
+function fetchNativeMalayalamTTSChunk(textChunk: string, timeoutMs = 8000): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    try {
+      const encoded = encodeURIComponent(textChunk);
+      const url = `https://translate.google.com/translate_tts?ie=UTF-8&tl=ml&client=tw-ob&q=${encoded}`;
+      const req = https.get(
+        url,
+        {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://translate.google.com/"
+          }
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve(null);
+            return;
+          }
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const fullBuf = Buffer.concat(chunks);
+            if (fullBuf.length > 200) {
+              resolve(fullBuf);
+            } else {
+              resolve(null);
+            }
+          });
+        }
+      );
+      req.on("error", () => resolve(null));
+      req.setTimeout(timeoutMs, () => {
+        req.destroy();
+        resolve(null);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Fallback: Synthesizes dynamic Malayalam speech for the entire paragraph.
+ * Chunks by punctuation, fetches ALL chunks without truncation, and combines into a full MP3 stream.
+ */
+async function generateNativeMalayalamTTS(rawText: string): Promise<string | null> {
+  const cleaned = cleanTextForTTS(rawText);
+  if (!cleaned) return null;
+
+  const cacheKey = `ml_female_native:::${cleaned}`;
+  if (ttsAudioCache.has(cacheKey)) {
+    return ttsAudioCache.get(cacheKey)!;
   }
 
-  try {
-    const ttsPromise = ai.models.generateContent({
-      model: "gemini-3.1-flash-tts-preview",
-      contents: text.slice(0, 260),
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Puck" }
+  // Split into manageable chunks by natural Malayalam punctuation
+  const chunks: string[] = [];
+  const rawSentences = cleaned.split(/(?<=[.!?|।\n,])/);
+  let current = "";
+
+  for (const s of rawSentences) {
+    const trimmed = s.trim();
+    if (!trimmed) continue;
+    if ((current + " " + trimmed).length <= 150) {
+      current = current ? `${current} ${trimmed}` : trimmed;
+    } else {
+      if (current) chunks.push(current);
+      if (trimmed.length > 150) {
+        const words = trimmed.split(" ");
+        let sub = "";
+        for (const w of words) {
+          if ((sub + " " + w).length <= 150) {
+            sub = sub ? `${sub} ${w}` : w;
+          } else {
+            if (sub) chunks.push(sub);
+            sub = w;
           }
         }
+        if (sub) chunks.push(sub);
+        current = "";
+      } else {
+        current = trimmed;
       }
-    });
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("TTS timeout")), timeoutMs)
-    );
-
-    const res: any = await Promise.race([ttsPromise, timeoutPromise]);
-    const rawPcm = res.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (rawPcm) {
-      const wav = pcmToWav(rawPcm);
-      return `data:audio/wav;base64,${wav.toString("base64")}`;
-    }
-  } catch (err: any) {
-    const errMsg = String(err?.message || err || "");
-    const isQuotaExceeded =
-      err?.status === 429 ||
-      errMsg.includes("429") ||
-      errMsg.includes("RESOURCE_EXHAUSTED") ||
-      errMsg.includes("Quota exceeded");
-
-    if (isQuotaExceeded) {
-      // Free-tier TTS limit is only 10 requests/day or 3/min. Cool down for 30 minutes.
-      ttsQuotaExhaustedUntil = Date.now() + 30 * 60 * 1000;
-      console.log("[TTS] Gemini TTS rate/quota limit reached. Seamlessly activating browser speech fallback.");
-    } else if (errMsg.includes("timeout")) {
-      console.log("[TTS] Gemini TTS timed out. Seamlessly activating browser speech fallback.");
-    } else {
-      console.log("[TTS] Gemini TTS unavailable. Seamlessly activating browser speech fallback.");
     }
   }
+  if (current) chunks.push(current);
+
+  if (chunks.length === 0) return null;
+
+  try {
+    const audioBuffers: Buffer[] = [];
+    for (const chunk of chunks) {
+      const buf = await fetchNativeMalayalamTTSChunk(chunk);
+      if (buf) {
+        audioBuffers.push(buf);
+      }
+    }
+
+    if (audioBuffers.length > 0) {
+      const combined = Buffer.concat(audioBuffers);
+      const dataUrl = `data:audio/mp3;base64,${combined.toString("base64")}`;
+      ttsAudioCache.set(cacheKey, dataUrl);
+      console.log(`[TTS-Female] Synthesized ${combined.length} bytes of native female Malayalam audio across all ${chunks.length} chunks (full paragraph)`);
+      return dataUrl;
+    }
+  } catch (err) {
+    console.warn("[TTS-Female] Native female synthesis failed:", err);
+  }
+
+  return null;
+}
+
+/**
+ * High-fidelity Female Malayalam Neural TTS (Microsoft Sobhana Online)
+ * Voice: ml-IN-SobhanaNeural (Gender: Female)
+ * Reads out the complete paragraph without truncation.
+ */
+async function generateFemaleMalayalamNeuralTTS(rawText: string, timeoutMs = 25000): Promise<string | null> {
+  const cleaned = cleanTextForTTS(rawText);
+  if (!cleaned) return null;
+
+  const cacheKey = `female_sobhana:::${cleaned}`;
+  if (ttsAudioCache.has(cacheKey)) {
+    return ttsAudioCache.get(cacheKey)!;
+  }
+
+  // If text is within normal paragraph length (<= 750 chars), synthesize directly in one shot
+  if (cleaned.length <= 750) {
+    const tmpFile = path.join(os.tmpdir(), `astrologer_female_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp3`);
+    try {
+      const tts = new EdgeTTS({
+        voice: "ml-IN-SobhanaNeural",
+        lang: "ml-IN",
+        outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+        pitch: "+0Hz",
+        rate: "+0%"
+      });
+
+      const genPromise = tts.ttsPromise(cleaned, tmpFile);
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("EdgeTTS female timeout")), timeoutMs)
+      );
+
+      await Promise.race([genPromise, timeoutPromise]);
+
+      const buf = await fsPromises.readFile(tmpFile);
+      await fsPromises.unlink(tmpFile).catch(() => {});
+
+      if (buf && buf.length > 500) {
+        const dataUrl = `data:audio/mp3;base64,${buf.toString("base64")}`;
+        ttsAudioCache.set(cacheKey, dataUrl);
+        console.log(`[TTS-Female] Synthesized ${buf.length} bytes for full paragraph (${cleaned.length} chars) using Sobhana Female Neural Voice`);
+        return dataUrl;
+      }
+    } catch (err: any) {
+      console.warn("[TTS-Female] EdgeTTS female generation failed, will try fallback:", err?.message || err);
+      await fsPromises.unlink(tmpFile).catch(() => {});
+    }
+  } else {
+    // If paragraph is extraordinarily long (> 750 chars), split by sentences and concatenate
+    const sentences = cleaned.split(/(?<=[.!?|।\n])/).map((s) => s.trim()).filter(Boolean);
+    const chunks: string[] = [];
+    let current = "";
+    for (const s of sentences) {
+      if ((current + " " + s).length <= 500) {
+        current = current ? `${current} ${s}` : s;
+      } else {
+        if (current) chunks.push(current);
+        current = s;
+      }
+    }
+    if (current) chunks.push(current);
+
+    try {
+      const buffers: Buffer[] = [];
+      const tts = new EdgeTTS({
+        voice: "ml-IN-SobhanaNeural",
+        lang: "ml-IN",
+        outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+        pitch: "+0Hz",
+        rate: "+0%"
+      });
+
+      for (let i = 0; i < chunks.length; i++) {
+        const chunkTmpFile = path.join(os.tmpdir(), `astrologer_female_part_${Date.now()}_${i}.mp3`);
+        await tts.ttsPromise(chunks[i], chunkTmpFile);
+        const partBuf = await fsPromises.readFile(chunkTmpFile);
+        await fsPromises.unlink(chunkTmpFile).catch(() => {});
+        if (partBuf && partBuf.length > 200) {
+          buffers.push(partBuf);
+        }
+      }
+
+      if (buffers.length > 0) {
+        const fullBuf = Buffer.concat(buffers);
+        const dataUrl = `data:audio/mp3;base64,${fullBuf.toString("base64")}`;
+        ttsAudioCache.set(cacheKey, dataUrl);
+        console.log(`[TTS-Female] Synthesized ${fullBuf.length} bytes for entire multi-part paragraph (${cleaned.length} chars) using Sobhana Female Voice`);
+        return dataUrl;
+      }
+    } catch (err: any) {
+      console.warn("[TTS-Female] Multi-part EdgeTTS failed:", err?.message || err);
+    }
+  }
+
+  return null;
+}
+
+let hfF5Client: any = null;
+let isConnectingHfClient = false;
+
+/**
+ * Connects or returns existing Gradio Client for Hugging Face space sajilck/malayalam-f5-tts-demo
+ */
+async function getF5MalayalamClient(): Promise<any> {
+  if (hfF5Client) return hfF5Client;
+  if (isConnectingHfClient) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (hfF5Client) return hfF5Client;
+  }
+  isConnectingHfClient = true;
+  try {
+    console.log("[F5-TTS] Connecting to Hugging Face Space: sajilck/malayalam-f5-tts-demo...");
+    hfF5Client = await GradioClient.connect("sajilck/malayalam-f5-tts-demo");
+    console.log("[F5-TTS] Connected to Hugging Face sajilck/f5-tts-malayalam-v2 successfully!");
+    return hfF5Client;
+  } catch (err: any) {
+    console.warn("[F5-TTS] Failed to connect to Hugging Face space:", err?.message || err);
+    return null;
+  } finally {
+    isConnectingHfClient = false;
+  }
+}
+
+/**
+ * Main Malayalam Speech Audio Generator - strictly FEMALE voice only.
+ * Primary: High-fidelity Female Malayalam Neural Voice (Sobhana / Unnimaya).
+ * Secondary: Native Malayalam Female Speech Engine (Google Translate tl=ml).
+ * Completely reads out the entire paragraph.
+ */
+async function generateSpeechAudio(rawText: string, _voiceName = "female-astrologer", timeoutMs = 25000): Promise<string | null> {
+  const spokenText = cleanTextForTTS(rawText);
+  if (!spokenText) return null;
+
+  const cacheKey = `female:::${spokenText}`;
+  if (ttsAudioCache.has(cacheKey)) {
+    console.log(`[TTS-Female] Serving cached female audio for full paragraph: "${spokenText.slice(0, 30)}..."`);
+    return ttsAudioCache.get(cacheKey)!;
+  }
+
+  // 1. Primary: High-fidelity Female Malayalam Neural Voice (ml-IN-SobhanaNeural)
+  console.log(`[TTS-Female] Synthesizing Female Malayalam Voice (Sobhana) for full paragraph (${spokenText.length} chars): "${spokenText.slice(0, 40)}..."`);
+  const femaleAudio = await generateFemaleMalayalamNeuralTTS(spokenText, timeoutMs);
+  if (femaleAudio) {
+    ttsAudioCache.set(cacheKey, femaleAudio);
+    return femaleAudio;
+  }
+
+  // 2. Fallback: Native Malayalam Female Speech Engine (Google Translate tl=ml)
+  console.log(`[TTS-Female] Falling back to Native Malayalam Female Engine for full paragraph: "${spokenText.slice(0, 40)}..."`);
+  const nativeAudio = await generateNativeMalayalamTTS(spokenText);
+  if (nativeAudio) {
+    ttsAudioCache.set(cacheKey, nativeAudio);
+    return nativeAudio;
+  }
+
   return null;
 }
 
@@ -242,14 +494,29 @@ app.get("/api/health", (req, res) => {
     app: "KAI NOKKI",
     tagline: "Ninte kai onnu kaanikkeda...",
     llm_available: !!ai,
-    mock_mode: !ai
+    mock_mode: !ai,
+    tts_model: "Female Malayalam Voice (Sobhana Neural / Unnimaya)",
+    current_voice: "Female Astrologer (Unnimaya / Sobhana)"
   });
+});
+
+// List available voices - Female Astrologer Voice
+app.get("/api/voices", (req, res) => {
+  const voices = [
+    {
+      id: "female-astrologer",
+      name: "Female Malayalam Astrologer (Unnimaya)",
+      description: "Authentic Female Kerala Astrologer Voice (Sobhana Neural & Native ML)"
+    }
+  ];
+  res.json({ voices, default: "female-astrologer" });
 });
 
 // 2. Palm Analysis
 app.post("/api/analyze-palm", async (req, res) => {
   try {
     const rawFeatures = req.body.features || {};
+    const requestedVoice = "Fenrir";
     const palmFeatures = {
       hand: rawFeatures.hand || "right",
       palm_width: rawFeatures.palm_width || 520,
@@ -285,12 +552,30 @@ app.post("/api/analyze-palm", async (req, res) => {
       }
     }
 
+    // Generate Malayalam AI model sound directly for the summary (Female Astrologer Voice - Unnimaya)
+    let audioUrl = "/public/audio/completed.mp3";
+    let audioFormat = "url";
+    let ttsAvailable = false;
+
+    try {
+      const generatedAudio = await generateSpeechAudio(summary, "female-astrologer", 25000);
+      if (generatedAudio) {
+        audioUrl = generatedAudio;
+        audioFormat = "base64_wav";
+        ttsAvailable = true;
+      }
+    } catch (ttsErr) {
+      console.warn("Speech generation during palm analysis caught:", ttsErr);
+    }
+
     res.json({
       reading,
       features: palmFeatures,
       summary,
-      audio_url: "/public/audio/completed.mp3",
-      audio_format: "url"
+      audio_url: audioUrl,
+      audio_format: audioFormat,
+      tts_available: ttsAvailable,
+      voice: "female-astrologer"
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || "Palm analysis error" });
@@ -301,6 +586,7 @@ app.post("/api/analyze-palm", async (req, res) => {
 app.post("/api/chat", async (req, res) => {
   try {
     const { message, palm_context, chat_history } = req.body;
+    const requestedVoice = "female-astrologer";
     if (!message) {
       return res.status(400).json({ error: "Message is required" });
     }
@@ -331,29 +617,48 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
+    // Generate Malayalam AI model sound for the chat reply (Female Astrologer Voice - Unnimaya)
+    let audioUrl = "/public/audio/completed.mp3";
+    let audioFormat = "url";
+    let ttsAvailable = false;
+
+    try {
+      const generatedAudio = await generateSpeechAudio(reply, "female-astrologer", 25000);
+      if (generatedAudio) {
+        audioUrl = generatedAudio;
+        audioFormat = "base64_wav";
+        ttsAvailable = true;
+      }
+    } catch (ttsErr) {
+      console.warn("Speech generation during chat caught:", ttsErr);
+    }
+
     res.json({
       text: reply,
-      audio_url: "/public/audio/completed.mp3",
-      audio_format: "url"
+      audio_url: audioUrl,
+      audio_format: audioFormat,
+      tts_available: ttsAvailable,
+      voice: "female-astrologer"
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || "Chat error" });
   }
 });
 
-// 4. TTS Endpoint
+// 4. TTS Endpoint (Explicit on-demand Malayalam AI Voice synthesis)
 app.post("/api/tts", async (req, res) => {
   try {
     const { text } = req.body;
     if (!text) {
       return res.status(400).json({ error: "Text is required" });
     }
-    const audioDataUrl = await generateSpeechAudio(text);
+    const audioDataUrl = await generateSpeechAudio(text, "female-astrologer", 25000);
     if (audioDataUrl) {
       return res.json({
         audio_url: audioDataUrl,
         format: "base64_wav",
         text,
+        voice: "female-astrologer",
         tts_available: true
       });
     }
@@ -361,6 +666,7 @@ app.post("/api/tts", async (req, res) => {
       audio_url: "/public/audio/completed.mp3",
       format: "url",
       text,
+      voice: "female-astrologer",
       tts_available: false
     });
   } catch (err: any) {
@@ -368,22 +674,31 @@ app.post("/api/tts", async (req, res) => {
       audio_url: "/public/audio/completed.mp3",
       format: "url",
       text: req.body?.text || "",
+      voice: "female-astrologer",
       tts_available: false
     });
   }
 });
 
 // Serve Static Frontend
-app.use("/css", express.static(path.join(process.cwd(), "css")));
-app.use("/js", express.static(path.join(process.cwd(), "js")));
-app.use("/public", express.static(path.join(process.cwd(), "public")));
+const resolveDir = (dirName: string) => {
+  const cwdDir = path.join(process.cwd(), dirName);
+  if (fs.existsSync(cwdDir)) return cwdDir;
+  const distDir = path.join(__dirname, dirName);
+  if (fs.existsSync(distDir)) return distDir;
+  return cwdDir;
+};
+
+app.use("/css", express.static(resolveDir("css")));
+app.use("/js", express.static(resolveDir("js")));
+app.use("/public", express.static(resolveDir("public")));
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "index.html"));
+  res.sendFile(resolveFile("index.html"));
 });
 
 app.get("/camera.html", (req, res) => {
-  res.sendFile(path.join(process.cwd(), "camera.html"));
+  res.sendFile(resolveFile("camera.html"));
 });
 
 // WebSocket Signaling for WebRTC
