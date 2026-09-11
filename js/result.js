@@ -66,20 +66,29 @@ class ResultController {
     if (!this.currentData) return;
     this.isPlaying = true;
     if (this.waveformEl) this.waveformEl.style.display = "flex";
-    if (this.playVoiceBtn) this.playVoiceBtn.textContent = "⏹ STOP VOICE";
+    if (this.playVoiceBtn) this.playVoiceBtn.textContent = "🔊 LOADING TTS...";
 
-    const selectedVoice = "Fenrir";
-    const audioUrl = this.currentData.audio_url || null;
+    const selectedVoice = "Arjun";
+    let audioUrl = this.currentData.audio_url || null;
     const speechText = this.currentData.summary || "";
 
     try {
+      if (!audioUrl && speechText) {
+         const ttsRes = await window.apiClient.generateTTS(speechText);
+         if (ttsRes && ttsRes.audio_url) {
+            audioUrl = ttsRes.audio_url;
+            this.currentData.audio_url = audioUrl;
+         }
+      }
+
+      if (this.playVoiceBtn) this.playVoiceBtn.textContent = "⏹ STOP VOICE";
       await window.audioController.playResultAudio(audioUrl, speechText, selectedVoice);
     } catch (e) {
       console.warn("Playback error:", e);
     } finally {
       this.isPlaying = false;
       if (this.waveformEl) this.waveformEl.style.display = "none";
-      if (this.playVoiceBtn) this.playVoiceBtn.textContent = "🔊 PLAY FEMALE VOICE";
+      if (this.playVoiceBtn) this.playVoiceBtn.textContent = "🔊 PLAY PIPER ARJUN";
     }
   }
 
@@ -88,7 +97,7 @@ class ResultController {
       window.audioController.stopAudio();
       this.isPlaying = false;
       if (this.waveformEl) this.waveformEl.style.display = "none";
-      if (this.playVoiceBtn) this.playVoiceBtn.textContent = "🔊 PLAY FEMALE VOICE";
+      if (this.playVoiceBtn) this.playVoiceBtn.textContent = "🔊 PLAY PIPER ARJUN";
     } else {
       window.audioController.unlockAudio();
       if ('speechSynthesis' in window) {

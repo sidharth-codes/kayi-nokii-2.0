@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KAI NOKKI - AI Jothishyan</title>
+  <title>KAI NOKKI</title>
   <meta name="description" content="AI-powered humorous Kerala-style palm-reading and jothishyan entertainment experience (&quot;Ninte kai onnu kaanikkeda...&quot;)">
-  <meta property="og:title" content="KAI NOKKI - AI Jothishyan">
+  <meta property="og:title" content="KAI NOKKI">
   <meta property="og:description" content="AI-powered humorous Kerala-style palm-reading and jothishyan entertainment experience (&quot;Ninte kai onnu kaanikkeda...&quot;)">
   <meta property="og:type" content="website">
   <link rel="stylesheet" href="/css/style.css">
@@ -21,7 +21,7 @@
         <span class="brand-badge">AI JOTHISHYAN</span>
       </div>
       <div class="nav-actions">
-        <span id="ai-voice-pill" class="mock-badge live" title="Authentic Female Malayalam Voice (Sobhana Neural / Unnimaya)">🎙️ FEMALE MALAYALAM VOICE</span>
+        <span id="ai-voice-pill" class="mock-badge live" title="Local Piper Malayalam TTS (Arjun)">🎙️ PIPER ARJUN TTS</span>
         <span id="backend-status-pill" class="mock-badge live">AI BACKEND: ONLINE</span>
         <button id="toggle-audio-btn" class="btn btn-secondary btn-sm" title="Toggle Audio Guidance">🔊 AUDIO: ON</button>
         <button id="toggle-mock-btn" class="btn btn-secondary btn-sm" title="Toggle AI / Mock Mode">MOCK MODE: OFF</button>
@@ -180,10 +180,16 @@
           <span class="category-badge">READING COMPLETE</span>
           <h2 class="headline" style="font-size: 32px; margin-top: 4px;">THE JOTHISHYAN HAS SPOKEN</h2>
         </div>
+        
+        <div class="voice-controls-bar" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px;">
+          <label style="font-size: 11px; color: var(--gold);">SPEED:</label>
+          <input type="range" id="piper-speed-slider" min="0.5" max="2.0" step="0.1" value="1.0" style="width: 100px;">
+          <span id="piper-speed-val" style="font-size: 11px; color: var(--gold);">1.0x</span>
+        </div>
         <div class="voice-controls-bar" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-          <span class="mock-badge live" style="font-size: 11px; padding: 5px 10px; border-color: var(--gold); color: var(--gold);">🎙️ F5-TTS MALAYALAM (SAJILCK/V2)</span>
+          <span class="mock-badge live" style="font-size: 11px; padding: 5px 10px; border-color: var(--gold); color: var(--gold);">🎙️ PIPER ARJUN TTS</span>
           <button id="btn-play-jothishyan-voice" class="btn btn-gold btn-sm">
-            🔊 PLAY F5-TTS VOICE
+            🔊 PLAY PIPER ARJUN
           </button>
         </div>
       </div>

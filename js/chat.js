@@ -75,28 +75,39 @@ class ChatController {
 
     try {
       const palmContext = (window.app && window.app.currentPalmData) ? window.app.currentPalmData.features : {};
-      const activeVoice = "Fenrir";
+      const activeVoice = "Arjun";
       const res = await window.apiClient.sendChatMessage({
         message: text,
         palm_context: palmContext,
         chat_history: this.chatHistory,
-        voice: "Fenrir"
+        voice: "Arjun"
       });
 
       this.removeTypingIndicator(typingIndicatorId);
 
       const replyText = res.text || "എടാ... കണക്ഷൻ ചെറിയൊരു പ്രശ്നത്തിലായി!";
-      this.appendMessage({
+      const msgObj = {
         role: "jothishyan",
         text: replyText,
-        audio_url: res.audio_url,
-        voice: "Fenrir"
-      });
-
+        audio_url: null,
+        voice: "Arjun"
+      };
+      
+      const msgEl = this.appendMessage(msgObj);
       this.chatHistory.push({ role: "jothishyan", text: replyText });
 
-      // Automatically play response Malayalam AI voice (Fenrir Deep Astrologer)
-      window.audioController.playResultAudio(res.audio_url, replyText, "Fenrir");
+      // Step 5: Fetch TTS
+      const speakingIndicatorId = this.showSpeakingIndicator();
+      try {
+        const ttsRes = await window.apiClient.generateTTS(replyText);
+        this.removeSpeakingIndicator(speakingIndicatorId);
+        if (ttsRes && ttsRes.audio_url) {
+          window.audioController.playResultAudio(ttsRes.audio_url, replyText, "Arjun");
+        }
+      } catch (err) {
+        this.removeSpeakingIndicator(speakingIndicatorId);
+        console.warn("TTS generation failed:", err);
+      }
     } catch (err) {
       this.removeTypingIndicator(typingIndicatorId);
       this.appendMessage({
@@ -109,12 +120,12 @@ class ChatController {
   }
 
   appendMessage(msg) {
-    if (!this.messagesFeedEl) return;
+    if (!this.messagesFeedEl) return null;
 
     const msgEl = document.createElement("div");
     msgEl.className = `chat-message ${msg.role}`;
 
-    const senderName = msg.role === "user" ? "YOU" : "UNNIMAYA KAI NOKKI";
+    const senderName = msg.role === "user" ? "YOU" : "KAI NOKKI";
 
     msgEl.innerHTML = `
       <span class="message-sender">${senderName}</span>
@@ -127,19 +138,20 @@ class ChatController {
       audioBtn.className = "btn btn-secondary btn-sm message-audio-btn";
       audioBtn.style.fontSize = "11px";
       audioBtn.style.padding = "4px 8px";
-      audioBtn.innerHTML = "▶ 🔊 PLAY FEMALE VOICE";
+      audioBtn.innerHTML = "▶ 🔊 PLAY PIPER ARJUN";
       audioBtn.onclick = () => {
         window.audioController.unlockAudio();
         if ('speechSynthesis' in window) {
           window.speechSynthesis.resume();
         }
-        window.audioController.playResultAudio(msg.audio_url, msg.text, "Fenrir");
+        window.audioController.playResultAudio(msg.audio_url, msg.text, "Arjun");
       };
       msgEl.appendChild(audioBtn);
     }
 
     this.messagesFeedEl.appendChild(msgEl);
     this.scrollToBottom();
+    return msgEl;
   }
 
   showTypingIndicator() {
@@ -148,7 +160,7 @@ class ChatController {
     el.id = id;
     el.className = "chat-message jothishyan";
     el.innerHTML = `
-      <span class="message-sender">UNNIMAYA KAI NOKKI</span>
+      <span class="message-sender">KAI NOKKI</span>
       <div class="message-bubble" style="font-style: italic; color: var(--accent-gold);">
         Onnu nokkatte... Hmmm...
       </div>

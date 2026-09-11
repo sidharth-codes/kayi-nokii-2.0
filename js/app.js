@@ -19,6 +19,17 @@ class App {
   }
 
   async init() {
+
+    const speedSlider = document.getElementById('piper-speed-slider');
+    const speedVal = document.getElementById('piper-speed-val');
+    if (speedSlider) {
+      window.piperSpeed = parseFloat(speedSlider.value);
+      speedSlider.addEventListener('input', (e) => {
+        window.piperSpeed = parseFloat(e.target.value);
+        if (speedVal) speedVal.textContent = window.piperSpeed.toFixed(1) + 'x';
+      });
+    }
+
     // Instantiate sub-controllers
     this.scannerController = new ScannerController();
     this.resultController = new ResultController();

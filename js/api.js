@@ -61,14 +61,17 @@ class ApiClient {
       const res = await this.fetchWithTimeout(`${this.baseUrl}/api/tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({ text, speed: window.piperSpeed || 1.0 })
       });
+      const data = await res.json();
       if (res.ok) {
-        return await res.json();
+        return data;
       }
-      throw new Error(`Server returned ${res.status}`);
+      throw new Error(data.instructions ? `${data.error}\n\n${data.instructions}` : data.error || `Server returned ${res.status}`);
     } catch (err) {
-      return { audio_url: "/public/audio/completed.mp3", format: "url", text };
+      console.error("Piper TTS Error:", err.message);
+      alert("TTS Engine Error:\n\n" + err.message);
+      return { audio_url: null, format: "none", text };
     }
   }
 
